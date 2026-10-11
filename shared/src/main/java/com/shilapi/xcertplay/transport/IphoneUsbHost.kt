@@ -280,7 +280,10 @@ class IphoneUsbHost(
                 throw IphoneUsbException.DeviceUnavailable("Android could not claim USBMUX interface 1")
             }
             claimedInterface = usbMux
-            return Iap2UsbSession(connection, endpoints.first, endpoints.second, onDiagnostic)
+            return Iap2UsbSession(
+                connection, endpoints.first, endpoints.second, onDiagnostic,
+                recoverHaltedEndpoints = true,
+            )
         } catch (error: Throwable) {
             if (claimedInterface != null) connection.releaseInterface(claimedInterface)
             connection.close()
@@ -428,6 +431,11 @@ class Iap2UsbSession internal constructor(
     private val outEndpoint: UsbEndpoint,
     private val inEndpoint: UsbEndpoint,
     private val onDiagnostic: (String) -> Unit = {},
+    /**
+     * Clear a halted (STALLed) bulk endpoint and retry instead of dropping the session at once.
+     * Off by default so the queue-size trace stays exact; the head-unit host turns it on.
+     */
+    private val recoverHaltedEndpoints: Boolean = false,
 ) : Closeable {
     private val stateLock = Any()
     private val readLock = Any()
@@ -438,14 +446,27 @@ class Iap2UsbSession internal constructor(
     private val readQueuePolicy = UsbReadQueuePolicy.forCurrentPlatform()
     private val requests = UsbRequestQueue(connection, "usbmux-read-reaper")
 
+    // A halted (STALLed) bulk endpoint answers every later transfer with an error until the host
+    // clears the halt. Retry a bounded number of times instead of dropping the whole session.
     fun write(data: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
         checkOpen()
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
         if (data.isEmpty()) return@synchronized
-        val transferred = connection.bulkTransfer(outEndpoint, data, data.size, timeoutMillis)
-        if (transferred != data.size) {
-            throw IphoneUsbException.DeviceUnavailable(
-                "USBMUX write transferred $transferred of ${data.size} bytes",
+        var recovery = 0
+        while (true) {
+            val transferred = connection.bulkTransfer(outEndpoint, data, data.size, timeoutMillis)
+            if (transferred == data.size) return@synchronized
+            if (!recoverHaltedEndpoints || recovery >= MAX_IO_RECOVERIES ||
+                !recoverEndpoint(outEndpoint, "out")
+            ) {
+                throw IphoneUsbException.DeviceUnavailable(
+                    "USBMUX write transferred $transferred of ${data.size} bytes",
+                )
+            }
+            recovery++
+            onDiagnostic(
+                "USBMUX write recovered a halted out endpoint; retrying (attempt $recovery, " +
+                    "transferred=$transferred/${data.size})",
             )
         }
     }
@@ -454,6 +475,33 @@ class Iap2UsbSession internal constructor(
     fun read(timeoutMillis: Long): ByteArray? = synchronized(readLock) {
         checkOpen()
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
+        readWithRecovery(timeoutMillis)
+    }
+
+    /** Reads once, clearing a halted in endpoint and retrying a bounded number of times. */
+    private fun readWithRecovery(timeoutMillis: Long): ByteArray? {
+        var recovery = 0
+        while (true) {
+            try {
+                return readAttempt(timeoutMillis)
+            } catch (error: IphoneUsbException.DeviceUnavailable) {
+                val sessionFailed = synchronized(stateLock) { failure != null }
+                if (!recoverHaltedEndpoints || sessionFailed || recovery >= MAX_IO_RECOVERIES ||
+                    !recoverEndpoint(inEndpoint, "in")
+                ) {
+                    throw failSession(error.message ?: "USBMUX read failed", error)
+                }
+                recovery++
+                onDiagnostic(
+                    "USBMUX read recovered a halted in endpoint; retrying (attempt $recovery; " +
+                        "${error.message})",
+                )
+            }
+        }
+    }
+
+    /** One read attempt; link failures stay recoverable so [read] can clear a halted endpoint. */
+    private fun readAttempt(timeoutMillis: Long): ByteArray? {
         val request = UsbRequest()
         var initialized = false
         try {
@@ -486,22 +534,22 @@ class Iap2UsbSession internal constructor(
             val completed = try {
                 requests.await(timeoutMillis)
             } catch (_: TimeoutException) {
-                return@synchronized drainTimedOutRead(request, buffer)
+                return drainTimedOutRead(request, buffer)
             }
             if (completed == null) {
-                throw failSession("Android returned no USBMUX read request")
+                throw IphoneUsbException.DeviceUnavailable("Android returned no USBMUX read request")
             }
             if (completed !== request) {
                 throw failSession("Android completed an unexpected USB request")
             }
-            return@synchronized ByteArray(buffer.position()).also {
+            return ByteArray(buffer.position()).also {
                 buffer.flip()
                 buffer.get(it)
             }
         } catch (error: IphoneUsbException) {
             throw error
         } catch (error: RuntimeException) {
-            throw failSession("USBMUX read failed", error)
+            throw IphoneUsbException.DeviceUnavailable("USBMUX read failed", error)
         } finally {
             synchronized(stateLock) {
                 if (pendingRead === request) pendingRead = null
@@ -509,6 +557,28 @@ class Iap2UsbSession internal constructor(
             if (initialized) request.cancel()
             request.close()
         }
+    }
+
+    /**
+     * Clears a halted (STALLed) bulk endpoint with the USB standard CLEAR_FEATURE(ENDPOINT_HALT)
+     * request, so the next transfer can go through. Returns false when the host rejects it.
+     */
+    private fun recoverEndpoint(endpoint: UsbEndpoint, direction: String): Boolean {
+        val bytes = runCatching {
+            connection.controlTransfer(
+                0x02, // bmRequestType: host-to-device, standard, endpoint
+                0x01, // CLEAR_FEATURE
+                0x0000, // ENDPOINT_HALT
+                endpoint.address,
+                ByteArray(0),
+                0,
+                1_000,
+            )
+        }.getOrElse { -1 }
+        onDiagnostic(
+            "USBMUX halt recovery CLEAR_FEATURE($direction ${describeUsbEndpoint(endpoint)}) result=$bytes",
+        )
+        return bytes >= 0
     }
 
     override fun close() {
@@ -575,6 +645,7 @@ class Iap2UsbSession internal constructor(
     private companion object {
         const val USBMUX_READ_CHUNK_BYTES = 65_536
         const val CANCEL_DRAIN_TIMEOUT_MILLIS = 1_000L
+        const val MAX_IO_RECOVERIES = 3
     }
 }
 

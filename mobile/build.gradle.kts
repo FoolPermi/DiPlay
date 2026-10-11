@@ -18,7 +18,7 @@ android {
         minSdk = 25
         targetSdk = 37
         versionCode = 38
-        versionName = "0.2.19"
+        versionName = "0.2.18-usbfix"
 
     }
 
