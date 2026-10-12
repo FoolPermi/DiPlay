@@ -2143,9 +2143,11 @@ private class AudioRenderer(
     private fun usageFor(channel: AudioChannel): Int = when (channel) {
         AudioChannel.MEDIA -> AudioAttributes.USAGE_MEDIA
         AudioChannel.PHONE -> AudioAttributes.USAGE_VOICE_COMMUNICATION
-        // TEST BUILD: some head units do not route USAGE_ASSISTANT to the speakers, which silences
-        // Siri while music and guidance play. Send spoken assistant audio on the media usage instead.
-        AudioChannel.ASSISTANT -> AudioAttributes.USAGE_MEDIA
+        // Some head units do not route USAGE_ASSISTANT to the speakers, which silences Siri while
+        // music and guidance play. Spoken assistant audio is guidance, so send it on the navigation
+        // usage: the head unit's voice channel, with its own volume. The ASSISTANT channel still
+        // requests AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK, so Siri keeps ducking the music.
+        AudioChannel.ASSISTANT -> AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
         AudioChannel.NAVIGATION -> AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
     }
 
