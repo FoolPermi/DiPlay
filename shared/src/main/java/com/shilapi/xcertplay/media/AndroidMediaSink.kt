@@ -2015,7 +2015,9 @@ private class AudioRenderer(
     /** 0 uses usage-based routing; 1–20 attempt legacy stream types supported by the head unit. */
     private fun channelOverride(channel: AudioChannel): Int = when (channel) {
         AudioChannel.MEDIA -> mediaChannel
-        AudioChannel.NAVIGATION -> navigationChannel
+        // Siri shares the navigation channel, so the head unit's voice output carries both spoken
+        // guidance and the assistant. Calls keep their own voice-communication route (override 0).
+        AudioChannel.NAVIGATION, AudioChannel.ASSISTANT -> navigationChannel
         else -> 0
     }
 
