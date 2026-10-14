@@ -19,7 +19,9 @@ import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Parcel;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -84,6 +86,11 @@ public class GeelyProbeActivity extends Activity {
     private BroadcastReceiver keyBroadcastReceiver;
     private boolean broadcastRegistered;
     private TextView clusterStatus;
+    private IBinder hyBinder;
+    private boolean hyBound;
+    private EditText hySsidView;
+    private EditText hyPwdView;
+    private TextView hyStatus;
 
     private static final class Finding {
         final String label;
@@ -240,6 +247,67 @@ public class GeelyProbeActivity extends Activity {
         clusterStatus.setTextColor(TEXT);
         clusterStatus.setPadding(0, dp(6), 0, dp(6));
         list.addView(clusterStatus);
+
+        // ---- HY 支持库热点测试 ----
+        TextView hyTitle = new TextView(this);
+        hyTitle.setText("—— HY 支持库热点测试 ——");
+        hyTitle.setTextSize(16);
+        hyTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        hyTitle.setPadding(0, dp(16), 0, dp(4));
+        list.addView(hyTitle);
+
+        TextView hyHint = new TextView(this);
+        hyHint.setText("先点\"绑定支持库\"，再填你车机热点的名称/密码，点\"开热点\"。"
+                + "（支持库 = com.hyphp.hywebviewlibdcy）");
+        hyHint.setTextSize(13);
+        hyHint.setPadding(0, 0, 0, dp(6));
+        list.addView(hyHint);
+
+        hySsidView = new EditText(this);
+        hySsidView.setHint("热点 SSID（车机热点名称）");
+        hySsidView.setTextSize(16);
+        list.addView(hySsidView, matchWrap());
+
+        hyPwdView = new EditText(this);
+        hyPwdView.setHint("热点密码（至少 8 位）");
+        hyPwdView.setTextSize(16);
+        list.addView(hyPwdView, matchWrap());
+
+        LinearLayout hyButtons = new LinearLayout(this);
+        hyButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button hyBind = new Button(this);
+        hyBind.setText("绑定支持库");
+        hyBind.setAllCaps(false);
+        hyBind.setOnClickListener(v -> bindHySupport());
+        hyButtons.addView(hyBind, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button hyQuery = new Button(this);
+        hyQuery.setText("查询(50)");
+        hyQuery.setAllCaps(false);
+        hyQuery.setOnClickListener(v -> queryHotspot());
+        hyButtons.addView(hyQuery, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button hyOn = new Button(this);
+        hyOn.setText("开热点(52)");
+        hyOn.setAllCaps(false);
+        hyOn.setOnClickListener(v -> setHotspot(true));
+        hyButtons.addView(hyOn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button hyOff = new Button(this);
+        hyOff.setText("关(51)");
+        hyOff.setAllCaps(false);
+        hyOff.setOnClickListener(v -> setHotspot(false));
+        hyButtons.addView(hyOff, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        list.addView(hyButtons);
+
+        Button hyDirect = new Button(this);
+        hyDirect.setText("直接开热点（平台签名）");
+        hyDirect.setAllCaps(false);
+        hyDirect.setOnClickListener(v -> directHotspot());
+        list.addView(hyDirect, matchWrap());
+
+        hyStatus = new TextView(this);
+        hyStatus.setTextSize(13);
+        hyStatus.setTextColor(TEXT);
+        hyStatus.setPadding(0, dp(6), 0, dp(6));
+        list.addView(hyStatus);
 
         TextView summaryTitle = new TextView(this);
         summaryTitle.setText("—— 结论 ——");
@@ -557,6 +625,150 @@ public class GeelyProbeActivity extends Activity {
             broadcastLogText.append(text);
             broadcastLog.setText(broadcastLogText.toString());
         });
+    }
+
+    // ===== HY 支持库 AIDL 热点测试 =====
+
+    private static final String HY_PACKAGE = "com.hyphp.hywebviewlibdcy";
+    private static final String HY_ACTION = "com.hyphp.hywebviewlibdcy.action";
+    private static final String HY_DESCRIPTOR = "com.hyphp.hywebviewlibdcy.HYApi";
+    private static final int TX_IS_AP_ENABLED = 50;
+    private static final int TX_STOP_SOFTAP = 51;
+    private static final int TX_START_SOFTAP = 52;
+
+    private void bindHySupport() {
+        if (hyBound) {
+            hyStatus.setText("已绑定");
+            return;
+        }
+        Intent intent = new Intent(HY_ACTION);
+        intent.setPackage(HY_PACKAGE);
+        boolean bound;
+        try {
+            bound = bindService(intent, hyConnection, Context.BIND_AUTO_CREATE);
+        } catch (Throwable t) {
+            hyStatus.setTextColor(MISSING);
+            hyStatus.setText("bind 异常: " + t);
+            return;
+        }
+        hyBound = bound;
+        hyStatus.setTextColor(bound ? WARN : MISSING);
+        hyStatus.setText(bound ? "bind=OK，等待服务…" : "bind=false（支持库没装？）");
+    }
+
+    private final ServiceConnection hyConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            hyBinder = service;
+            hyStatus.setTextColor(OK);
+            hyStatus.setText("已连接支持库。现在填 SSID/密码 → 点开热点(52)。");
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            hyBinder = null;
+            hyStatus.setTextColor(WARN);
+            hyStatus.setText("支持库已断开");
+        }
+    };
+
+    private void queryHotspot() {
+        hyStatus.setText(hyTransact(TX_IS_AP_ENABLED, null, null));
+    }
+
+    private void setHotspot(boolean on) {
+        if (on) {
+            String ssid = hySsidView.getText().toString().trim();
+            String pwd = hyPwdView.getText().toString();
+            if (ssid.isEmpty()) {
+                hyStatus.setTextColor(MISSING);
+                hyStatus.setText("先填 SSID");
+                return;
+            }
+            hyStatus.setText(hyTransact(TX_START_SOFTAP, ssid, pwd));
+        } else {
+            hyStatus.setText(hyTransact(TX_STOP_SOFTAP, null, null));
+        }
+    }
+
+    /** Path B: this app starts the hotspot itself (needs the platform signature). */
+    private void directHotspot() {
+        StringBuilder sb = new StringBuilder();
+        int granted = checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS");
+        boolean sec = granted == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        sb.append("WRITE_SECURE_SETTINGS: ").append(sec ? "已授予 ✓（平台签名生效）" : "未授予 ✗（不是平台签名）").append('\n');
+        try {
+            android.provider.Settings.Secure.putInt(getContentResolver(), "wifi_operate_save", 102);
+            sb.append("wifi_operate_save=102 写入 ✓\n");
+        } catch (Throwable t) {
+            sb.append("wifi_operate_save 写入失败: ").append(t).append('\n');
+        }
+        String ssid = hySsidView.getText().toString().trim();
+        String pwd = hyPwdView.getText().toString();
+        if (ssid.isEmpty()) {
+            sb.append("（先填 SSID 再试 startSoftAp）");
+            showHy(sb.toString(), MISSING);
+            return;
+        }
+        try {
+            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
+                    getApplicationContext().getSystemService(WIFI_SERVICE);
+            android.net.wifi.WifiConfiguration config = new android.net.wifi.WifiConfiguration();
+            config.SSID = ssid;
+            if (pwd == null || pwd.isEmpty()) {
+                config.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE);
+            } else {
+                config.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK);
+                config.preSharedKey = pwd;
+            }
+            Method method = wm.getClass().getMethod("startSoftAp", android.net.wifi.WifiConfiguration.class);
+            Object result = method.invoke(wm, config);
+            sb.append("startSoftAp -> ").append(result).append('\n');
+            showHy(sb.toString(), Boolean.TRUE.equals(result) ? OK : WARN);
+        } catch (Throwable t) {
+            sb.append("startSoftAp 异常: ").append(t).append('\n');
+            if (t.getCause() != null) {
+                sb.append("  原因: ").append(t.getCause()).append('\n');
+            }
+            showHy(sb.toString(), MISSING);
+        }
+    }
+
+    private void showHy(String text, int color) {
+        runOnUiThread(() -> {
+            hyStatus.setTextColor(color);
+            hyStatus.setText(text);
+        });
+    }
+
+    private String hyTransact(int code, String ssid, String pwd) {
+        IBinder binder = hyBinder;
+        if (binder == null) {
+            hyStatus.setTextColor(WARN);
+            return "未绑定支持库（先点\"绑定支持库\"）";
+        }
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(HY_DESCRIPTOR);
+            if (code == TX_START_SOFTAP) {
+                data.writeString(ssid);
+                data.writeString(pwd);
+            }
+            boolean transacted = binder.transact(code, data, reply, 0);
+            reply.readException();
+            boolean ok = reply.readInt() != 0;
+            hyStatus.setTextColor(ok ? OK : WARN);
+            return "事务 " + code + (code == TX_START_SOFTAP ? "(startSoftAp)"
+                    : code == TX_STOP_SOFTAP ? "(stopSoftAp)" : "(isWifiApEnabled)")
+                    + " transacted=" + transacted + " 返回=" + ok;
+        } catch (Throwable t) {
+            hyStatus.setTextColor(MISSING);
+            return "事务 " + code + " 异常: " + t;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
     }
 
     /** Pushes a fake now-playing entry to the instrument cluster through the ECARX adaptapi. */

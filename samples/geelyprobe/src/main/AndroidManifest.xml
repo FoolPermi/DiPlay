@@ -5,6 +5,8 @@
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+    <!-- Granted only to apps signed with the car's platform key (AOSP test key on this unit). -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <application
         android:label="Geely Probe"
