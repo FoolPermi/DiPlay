@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.net.Uri;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -20,6 +21,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
+import android.app.AppOpsManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -91,6 +93,8 @@ public class GeelyProbeActivity extends Activity {
     private EditText hySsidView;
     private EditText hyPwdView;
     private TextView hyStatus;
+    private LinearLayout bootBox;
+    private TextView bootStatus;
 
     private static final class Finding {
         final String label;
@@ -308,6 +312,45 @@ public class GeelyProbeActivity extends Activity {
         hyStatus.setTextColor(TEXT);
         hyStatus.setPadding(0, dp(6), 0, dp(6));
         list.addView(hyStatus);
+
+        // ---- 开机自启管理 ----
+        TextView bootTitle = new TextView(this);
+        bootTitle.setText("—— 开机自启管理 ——");
+        bootTitle.setTextSize(16);
+        bootTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        bootTitle.setPadding(0, dp(16), 0, dp(4));
+        list.addView(bootTitle);
+
+        TextView bootHint = new TextView(this);
+        bootHint.setText("点\"列出自启应用\"→ 列出所有收 BOOT_COMPLETED 的应用；"
+                + "点某个应用就能切换它的\"开机自启\"（需要平台签名）。");
+        bootHint.setTextSize(13);
+        bootHint.setPadding(0, 0, 0, dp(6));
+        list.addView(bootHint);
+
+        LinearLayout bootButtons = new LinearLayout(this);
+        bootButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button bootList = new Button(this);
+        bootList.setText("列出自启应用");
+        bootList.setAllCaps(false);
+        bootList.setOnClickListener(v -> listBootReceivers());
+        bootButtons.addView(bootList, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button bootOps = new Button(this);
+        bootOps.setText("AppOps 自启测试");
+        bootOps.setAllCaps(false);
+        bootOps.setOnClickListener(v -> testAutoStartOp());
+        bootButtons.addView(bootOps, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        list.addView(bootButtons);
+
+        bootStatus = new TextView(this);
+        bootStatus.setTextSize(12);
+        bootStatus.setTextColor(TEXT);
+        bootStatus.setPadding(0, dp(6), 0, dp(4));
+        list.addView(bootStatus);
+
+        bootBox = new LinearLayout(this);
+        bootBox.setOrientation(LinearLayout.VERTICAL);
+        list.addView(bootBox);
 
         TextView summaryTitle = new TextView(this);
         summaryTitle.setText("—— 结论 ——");
@@ -625,6 +668,107 @@ public class GeelyProbeActivity extends Activity {
             broadcastLogText.append(text);
             broadcastLog.setText(broadcastLogText.toString());
         });
+    }
+
+    // ===== 开机自启管理 =====
+
+    private void listBootReceivers() {
+        bootBox.removeAllViews();
+        PackageManager pm = getPackageManager();
+        List<ResolveInfo> receivers;
+        try {
+            receivers = pm.queryBroadcastReceivers(new Intent(Intent.ACTION_BOOT_COMPLETED), 0);
+        } catch (Throwable t) {
+            bootStatus.setTextColor(MISSING);
+            bootStatus.setText("查询失败: " + t);
+            return;
+        }
+        List<ActivityInfo> infos = new ArrayList<>();
+        for (ResolveInfo r : receivers) {
+            if (r.activityInfo != null) {
+                infos.add(r.activityInfo);
+            }
+        }
+        Collections.sort(infos, (a, b) -> a.packageName.compareTo(b.packageName));
+        bootStatus.setTextColor(OK);
+        bootStatus.setText("共 " + infos.size() + " 个开机自启接收器（点一下可切换）");
+        for (ActivityInfo ai : infos) {
+            addBootRow(pm, ai.packageName, ai.name);
+        }
+    }
+
+    private void addBootRow(PackageManager pm, String pkg, String cls) {
+        ComponentName cn = new ComponentName(pkg, cls);
+        int state;
+        int appState;
+        try {
+            state = pm.getComponentEnabledSetting(cn);
+            appState = pm.getApplicationEnabledSetting(pkg);
+        } catch (Throwable t) {
+            state = PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+            appState = PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+        }
+        Button row = new Button(this);
+        row.setAllCaps(false);
+        row.setText(pkg + "\n" + bootStateLabel(state, appState));
+        row.setTextSize(13);
+        row.setOnClickListener(v -> toggleBoot(cn, row));
+        bootBox.addView(row, matchWrap());
+    }
+
+    private String bootStateLabel(int state, int appState) {
+        if (appState == PackageManager.COMPONENT_ENABLED_STATE_DISABLED) return "应用已禁用";
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED) return "自启：已禁止 ✗";
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) return "自启：已允许 ✓";
+        return "自启：默认";
+    }
+
+    private void toggleBoot(ComponentName cn, Button row) {
+        PackageManager pm = getPackageManager();
+        int current = pm.getComponentEnabledSetting(cn);
+        int next = current == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
+        try {
+            pm.setComponentEnabledSetting(cn, next, PackageManager.DONT_KILL_APP);
+            int now = pm.getComponentEnabledSetting(cn);
+            String label = now == PackageManager.COMPONENT_ENABLED_STATE_DISABLED ? "自启：已禁止 ✗" : "自启：已允许 ✓";
+            row.setText(cn.getPackageName() + "\n" + label);
+            bootStatus.setTextColor(OK);
+            bootStatus.setText("切换成功：" + cn.getPackageName() + " -> " + label);
+        } catch (Throwable t) {
+            bootStatus.setTextColor(MISSING);
+            bootStatus.setText("切换失败：" + cn.getPackageName() + "\n" + t);
+        }
+    }
+
+    /** Tries the OEM/hidden AppOps auto-start op (10008) on this app itself. */
+    @SuppressWarnings("PrivateApi")
+    private void testAutoStartOp() {
+        StringBuilder sb = new StringBuilder();
+        int uid = android.os.Process.myUid();
+        String pkg = getPackageName();
+        sb.append("包=").append(pkg).append(" uid=").append(uid).append('\n');
+        try {
+            AppOpsManager aom = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+            Method setMode = AppOpsManager.class.getMethod("setMode", int.class, int.class, String.class, int.class);
+            Method getMode = AppOpsManager.class.getMethod("getMode", int.class, int.class, String.class);
+            Object before = getMode.invoke(aom, 10008, uid, pkg);
+            sb.append("getMode(10008) 读之前: ").append(before).append('\n');
+            setMode.invoke(aom, 10008, uid, pkg, AppOpsManager.MODE_IGNORED);
+            Object ignored = getMode.invoke(aom, 10008, uid, pkg);
+            setMode.invoke(aom, 10008, uid, pkg, AppOpsManager.MODE_ALLOWED);
+            Object allowed = getMode.invoke(aom, 10008, uid, pkg);
+            sb.append("设为 IGNORED 后: ").append(ignored).append('\n');
+            sb.append("设为 ALLOWED 后: ").append(allowed).append('\n');
+            sb.append("→ AppOps 10008 可读写 ✓");
+            bootStatus.setTextColor(OK);
+        } catch (Throwable t) {
+            sb.append("AppOps 10008 失败: ").append(t).append('\n');
+            if (t.getCause() != null) sb.append("  原因: ").append(t.getCause()).append('\n');
+            bootStatus.setTextColor(MISSING);
+        }
+        bootStatus.setText(sb.toString());
     }
 
     // ===== HY 支持库 AIDL 热点测试 =====
