@@ -1,12 +1,15 @@
 package com.diplay.geelyprobe;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.net.Uri;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -25,6 +28,9 @@ import android.widget.Toast;
 import com.geely.lib.oneosapi.input.IInputListener;
 import com.geely.lib.oneosapi.input.IInputManager;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -73,6 +79,11 @@ public class GeelyProbeActivity extends Activity {
     private IInputManager inputManager;
     private IInputListener keyListener;
     private boolean keyBound;
+    private TextView broadcastLog;
+    private final StringBuilder broadcastLogText = new StringBuilder();
+    private BroadcastReceiver keyBroadcastReceiver;
+    private boolean broadcastRegistered;
+    private TextView clusterStatus;
 
     private static final class Finding {
         final String label;
@@ -174,6 +185,61 @@ public class GeelyProbeActivity extends Activity {
         keyLog.setTextColor(OK);
         keyLog.setPadding(0, dp(6), 0, dp(6));
         list.addView(keyLog);
+
+        // ---- 方向盘按键广播抓取 ----
+        TextView bcTitle = new TextView(this);
+        bcTitle.setText("—— 按键广播抓取 ——");
+        bcTitle.setTextSize(16);
+        bcTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        bcTitle.setPadding(0, dp(16), 0, dp(4));
+        list.addView(bcTitle);
+
+        TextView bcHint = new TextView(this);
+        bcHint.setText("点\"开始监听\"，然后按方向盘按键。这里会显示收到的广播和它的所有参数。");
+        bcHint.setTextSize(13);
+        bcHint.setPadding(0, 0, 0, dp(6));
+        list.addView(bcHint);
+
+        LinearLayout bcButtons = new LinearLayout(this);
+        bcButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button bcStart = new Button(this);
+        bcStart.setText("开始监听");
+        bcStart.setAllCaps(false);
+        bcStart.setOnClickListener(v -> startBroadcastCapture());
+        bcButtons.addView(bcStart, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button bcStop = new Button(this);
+        bcStop.setText("停止");
+        bcStop.setAllCaps(false);
+        bcStop.setOnClickListener(v -> stopBroadcastCapture());
+        bcButtons.addView(bcStop, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        list.addView(bcButtons);
+
+        broadcastLog = new TextView(this);
+        broadcastLog.setTextSize(12);
+        broadcastLog.setTypeface(Typeface.MONOSPACE);
+        broadcastLog.setTextColor(TEXT);
+        broadcastLog.setPadding(0, dp(6), 0, dp(6));
+        list.addView(broadcastLog);
+
+        // ---- 仪表盘投屏测试 ----
+        TextView clTitle = new TextView(this);
+        clTitle.setText("—— 仪表盘投屏测试 ——");
+        clTitle.setTextSize(16);
+        clTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        clTitle.setPadding(0, dp(16), 0, dp(4));
+        list.addView(clTitle);
+
+        Button clTest = new Button(this);
+        clTest.setText("推一条假歌到仪表盘");
+        clTest.setAllCaps(false);
+        clTest.setOnClickListener(v -> testClusterDisplay());
+        list.addView(clTest, matchWrap());
+
+        clusterStatus = new TextView(this);
+        clusterStatus.setTextSize(13);
+        clusterStatus.setTextColor(TEXT);
+        clusterStatus.setPadding(0, dp(6), 0, dp(6));
+        list.addView(clusterStatus);
 
         TextView summaryTitle = new TextView(this);
         summaryTitle.setText("—— 结论 ——");
@@ -422,6 +488,167 @@ public class GeelyProbeActivity extends Activity {
             keyLogText.append(line);
             keyLog.setText(keyLogText.toString());
         });
+    }
+
+    private void startBroadcastCapture() {
+        if (broadcastRegistered) {
+            return;
+        }
+        keyBroadcastReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                dumpBroadcast(intent);
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("com.nwd.action.ACTION_KEY_VALUE");
+        filter.addAction(Intent.ACTION_MEDIA_BUTTON);
+        filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(keyBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(keyBroadcastReceiver, filter);
+            }
+            broadcastRegistered = true;
+            broadcastLogText.append("监听中：com.nwd.action.ACTION_KEY_VALUE / MEDIA_BUTTON\n");
+            broadcastLog.setText(broadcastLogText.toString());
+        } catch (Throwable t) {
+            broadcastLogText.append("注册失败: ").append(t).append('\n');
+            broadcastLog.setText(broadcastLogText.toString());
+        }
+    }
+
+    private void stopBroadcastCapture() {
+        if (broadcastRegistered && keyBroadcastReceiver != null) {
+            try {
+                unregisterReceiver(keyBroadcastReceiver);
+            } catch (Throwable ignored) {
+                // already gone
+            }
+        }
+        broadcastRegistered = false;
+        broadcastLogText.append("已停止\n");
+        broadcastLog.setText(broadcastLogText.toString());
+    }
+
+    private void dumpBroadcast(Intent intent) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("==== ").append(intent.getAction()).append(" ====\n");
+        try {
+            sb.append(intent.toUri(Intent.URI_INTENT_SCHEME)).append('\n');
+        } catch (Throwable t) {
+            sb.append("(toUri failed: ").append(t.getClass().getSimpleName()).append(")\n");
+        }
+        android.os.Bundle extras = intent.getExtras();
+        if (extras != null) {
+            for (String key : extras.keySet()) {
+                Object value;
+                try {
+                    value = extras.get(key);
+                } catch (Throwable t) {
+                    value = "<" + t.getClass().getSimpleName() + ">";
+                }
+                sb.append("   ").append(key).append(" = ").append(value).append('\n');
+            }
+        }
+        String text = sb.toString();
+        runOnUiThread(() -> {
+            broadcastLogText.append(text);
+            broadcastLog.setText(broadcastLogText.toString());
+        });
+    }
+
+    /** Pushes a fake now-playing entry to the instrument cluster through the ECARX adaptapi. */
+    private void testClusterDisplay() {
+        StringBuilder log = new StringBuilder();
+        try {
+            Class<?> dimClass = Class.forName("com.ecarx.xui.adaptapi.diminteraction.DimInteraction");
+            Object dim = dimClass.getMethod("create", Context.class).invoke(null, this);
+            log.append("DimInteraction.create -> ").append(dim == null ? "null" : "ok").append('\n');
+            if (dim == null) {
+                showCluster(log.toString(), MISSING);
+                return;
+            }
+            try {
+                dimClass.getMethod("setPresentationToDimSwitch", int.class, String.class, String.class, boolean.class)
+                        .invoke(dim, 1, "", "", true);
+                log.append("setPresentationToDimSwitch(1,,,true) ok\n");
+            } catch (Throwable t) {
+                log.append("setPresentationToDimSwitch 失败: ").append(t).append('\n');
+            }
+            Object media = dimClass.getMethod("getMediaInteraction").invoke(dim);
+            log.append("getMediaInteraction -> ").append(media == null ? "null" : "ok").append('\n');
+            if (media == null) {
+                showCluster(log.toString(), MISSING);
+                return;
+            }
+            Class<?> iMedia = Class.forName("com.ecarx.xui.adaptapi.diminteraction.IMediaInteraction");
+            iMedia.getMethod("updateCurrentSourceType", int.class).invoke(media, 6);
+            log.append("updateCurrentSourceType(6) ok\n");
+
+            Class<?> iPlayback = Class.forName(
+                    "com.ecarx.xui.adaptapi.diminteraction.IMediaInteraction$IPlaybackInfo");
+            Object playback = Proxy.newProxyInstance(iPlayback.getClassLoader(),
+                    new Class<?>[]{iPlayback}, new FakePlaybackInfo());
+            iMedia.getMethod("updatePlaybackInfo", iPlayback).invoke(media, playback);
+            log.append("updatePlaybackInfo(fake) ok\n");
+            iMedia.getMethod("updateCurrentProgress", long.class).invoke(media, 42000L);
+            log.append("updateCurrentProgress(42s) ok\n");
+            showCluster(log + "\n→ 看仪表盘有没有「DiPlay 测试歌曲 / 测试艺人」", OK);
+        } catch (Throwable t) {
+            log.append("失败: ").append(t).append('\n');
+            showCluster(log.toString(), MISSING);
+        }
+    }
+
+    private void showCluster(String text, int color) {
+        runOnUiThread(() -> {
+            clusterStatus.setTextColor(color);
+            clusterStatus.setText(text);
+        });
+    }
+
+    /** Dynamic proxy implementing the ECARX IPlaybackInfo interface by name. */
+    private static final class FakePlaybackInfo implements InvocationHandler {
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) {
+            switch (method.getName()) {
+                case "getTitle": return "DiPlay 测试歌曲";
+                case "getArtist": return "测试艺人";
+                case "getAlbum": return "测试专辑";
+                case "getDuration": return 180000L;
+                case "getPlaybackStatus": return 1;
+                case "getSourceType": return 6;
+                case "getLoopMode": return 0;
+                case "getFavoriteState": return 0;
+                case "getPlayingItemPositionInQueue": return 0;
+                case "getRadioMode": return 0;
+                case "getCurrentLyricSentence": return "";
+                case "getLyricContent": return "";
+                case "getRadioFrequency": return "";
+                case "getRadioStationName": return "";
+                case "getUUID": return "";
+                case "getArtwork":
+                case "getLyric":
+                case "getMediaPath":
+                case "getNextArtwork":
+                case "getPreviousArtwork":
+                    return null;
+                case "toString": return "DiPlayFakePlaybackInfo";
+                case "hashCode": return System.identityHashCode(proxy);
+                case "equals": return proxy == args[0];
+                default:
+                    break;
+            }
+            Class<?> type = method.getReturnType();
+            if (type == String.class) return "";
+            if (type == Uri.class) return null;
+            if (type == long.class) return 0L;
+            if (type == int.class) return 0;
+            if (type == boolean.class) return false;
+            return null;
+        }
     }
 
     private android.view.View findingView(Finding f) {
