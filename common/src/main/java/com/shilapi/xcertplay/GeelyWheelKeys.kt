@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -48,9 +49,16 @@ internal object GeelyWheelKeys {
     /** Binds while a CarPlay session is active; safe to call repeatedly. */
     @Synchronized
     fun start(context: Context) {
-        if (!GeelyHeadUnit.detected) return
+        if (!GeelyHeadUnit.detected) {
+            Log.i(TAG, "skip: not a Geely/Lynk head unit (brand=${Build.BRAND} product=${Build.PRODUCT})")
+            return
+        }
+        Log.i(TAG, "start: detected Geely/Lynk head unit (brand=${Build.BRAND} product=${Build.PRODUCT})")
         appContext = context.applicationContext
-        if (bound) return
+        if (bound) {
+            Log.i(TAG, "start: already bound")
+            return
+        }
         bindLocked()
     }
 
@@ -82,20 +90,29 @@ internal object GeelyWheelKeys {
             val context = appContext ?: return
             val input = IInputManager.Stub.asInterface(service)
             val registered = object : IInputListener.Stub() {
-                override fun onKeyCodeEvent(keyCode: Int, event: Int, softKeyFunction: Int) {}
+                override fun onKeyCodeEvent(keyCode: Int, event: Int, softKeyFunction: Int) {
+                    Log.i(TAG, "key event: onKeyCodeEvent key=$keyCode event=$event soft=$softKeyFunction")
+                }
                 override fun onShortClick(keyCode: Int, softKeyFunction: Int) {
+                    Log.i(TAG, "key event: onShortClick key=$keyCode soft=$softKeyFunction -> forward")
                     forward(keyCode)
                 }
-                override fun onHoldingPressStarted(keyCode: Int, softKeyFunction: Int) {}
-                override fun onHoldingPressStopped(keyCode: Int, softKeyFunction: Int) {}
+                override fun onHoldingPressStarted(keyCode: Int, softKeyFunction: Int) {
+                    Log.i(TAG, "key event: onHoldingPressStarted key=$keyCode soft=$softKeyFunction")
+                }
+                override fun onHoldingPressStopped(keyCode: Int, softKeyFunction: Int) {
+                    Log.i(TAG, "key event: onHoldingPressStopped key=$keyCode soft=$softKeyFunction")
+                }
                 override fun onLongPressTriggered(keyCode: Int, softKeyFunction: Int) {
-                    Log.i(TAG, "long press key=$keyCode func=$softKeyFunction")
+                    Log.i(TAG, "key event: onLongPressTriggered key=$keyCode soft=$softKeyFunction")
                     // The microphone key's long press: Siri, once the car's HiCar app is disabled.
                     if (keyCode == GeelyWheelKeyCodes.KEY_VOICE_ASSIST) {
                         Log.i(TAG, "Siri requested=${CarPlayMediaKeys.onExternalSiriKey()}")
                     }
                 }
-                override fun onDoubleClick(keyCode: Int, softKeyFunction: Int) {}
+                override fun onDoubleClick(keyCode: Int, softKeyFunction: Int) {
+                    Log.i(TAG, "key event: onDoubleClick key=$keyCode soft=$softKeyFunction")
+                }
             }
             synchronized(this@GeelyWheelKeys) {
                 manager = input
@@ -143,8 +160,13 @@ internal object GeelyWheelKeys {
             GeelyWheelKeyCodes.KEY_PLAY_PAUSE -> CarPlayMediaButton.PLAY_PAUSE
             GeelyWheelKeyCodes.KEY_NEXT -> CarPlayMediaButton.NEXT
             GeelyWheelKeyCodes.KEY_PREVIOUS -> CarPlayMediaButton.PREVIOUS
-            else -> return
+            else -> {
+                Log.i(TAG, "forward: unmapped key=$keyCode (expected play=${GeelyWheelKeyCodes.KEY_PLAY_PAUSE} " +
+                    "next=${GeelyWheelKeyCodes.KEY_NEXT} prev=${GeelyWheelKeyCodes.KEY_PREVIOUS})")
+                return
+            }
         }
-        CarPlayMediaKeys.onExternalMediaKey(index)
+        val sent = CarPlayMediaKeys.onExternalMediaKey(index)
+        Log.i(TAG, "forward: key=$keyCode -> button=$index sent=$sent")
     }
 }

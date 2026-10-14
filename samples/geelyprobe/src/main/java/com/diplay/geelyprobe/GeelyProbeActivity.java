@@ -22,6 +22,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.geely.lib.oneosapi.input.IInputListener;
+import com.geely.lib.oneosapi.input.IInputManager;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -64,6 +67,12 @@ public class GeelyProbeActivity extends Activity {
 
     private LinearLayout summaryBox;
     private TextView detailView;
+    private TextView keyStatus;
+    private TextView keyLog;
+    private final StringBuilder keyLogText = new StringBuilder();
+    private IInputManager inputManager;
+    private IInputListener keyListener;
+    private boolean keyBound;
 
     private static final class Finding {
         final String label;
@@ -121,6 +130,50 @@ public class GeelyProbeActivity extends Activity {
             Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
         });
         list.addView(copy, matchWrap());
+
+        // ---- 方向盘按键抓取 ----
+        TextView keyTitle = new TextView(this);
+        keyTitle.setText("—— 方向盘按键抓取 ——");
+        keyTitle.setTextSize(16);
+        keyTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        keyTitle.setPadding(0, dp(16), 0, dp(4));
+        list.addView(keyTitle);
+
+        TextView keyHint = new TextView(this);
+        keyHint.setText("点\"开始抓取\"，然后逐个按方向盘按键（上一曲/下一曲/播放/语音…），"
+                + "每按一个下面就会记下它的 keyCode。把这段拍给我。");
+        keyHint.setTextSize(13);
+        keyHint.setPadding(0, 0, 0, dp(6));
+        list.addView(keyHint);
+
+        LinearLayout keyButtons = new LinearLayout(this);
+        keyButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button keyStart = new Button(this);
+        keyStart.setText("开始抓取");
+        keyStart.setAllCaps(false);
+        keyStart.setOnClickListener(v -> startKeyCapture());
+        keyButtons.addView(keyStart,
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button keyStop = new Button(this);
+        keyStop.setText("停止");
+        keyStop.setAllCaps(false);
+        keyStop.setOnClickListener(v -> stopKeyCapture());
+        keyButtons.addView(keyStop,
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        list.addView(keyButtons);
+
+        keyStatus = new TextView(this);
+        keyStatus.setTextSize(14);
+        keyStatus.setTextColor(TEXT);
+        keyStatus.setPadding(0, dp(6), 0, 0);
+        list.addView(keyStatus);
+
+        keyLog = new TextView(this);
+        keyLog.setTextSize(18);
+        keyLog.setTypeface(Typeface.MONOSPACE);
+        keyLog.setTextColor(OK);
+        keyLog.setPadding(0, dp(6), 0, dp(6));
+        list.addView(keyLog);
 
         TextView summaryTitle = new TextView(this);
         summaryTitle.setText("—— 结论 ——");
@@ -253,6 +306,121 @@ public class GeelyProbeActivity extends Activity {
                 summaryBox.addView(findingView(f));
             }
             detailView.setText(detailText);
+        });
+    }
+
+    private void startKeyCapture() {
+        if (keyBound) {
+            keyStatus.setText("已在抓取中");
+            return;
+        }
+        keyLogText.setLength(0);
+        keyLog.setText("");
+        Intent intent = new Intent().setComponent(
+                new ComponentName("com.geely.inputservice", "com.geely.inputservice.InputService"));
+        boolean bound;
+        try {
+            bound = bindService(intent, keyConnection, Context.BIND_AUTO_CREATE);
+        } catch (Throwable t) {
+            keyStatus.setTextColor(MISSING);
+            keyStatus.setText("bind 异常: " + t.getClass().getSimpleName());
+            return;
+        }
+        keyBound = bound;
+        keyStatus.setTextColor(bound ? WARN : MISSING);
+        keyStatus.setText(bound ? "bind=OK，等待服务连接…" : "bind=false（服务不存在或不可绑定）");
+    }
+
+    private void stopKeyCapture() {
+        if (keyListener != null && inputManager != null) {
+            try {
+                inputManager.unregisterListener(keyListener, getPackageName());
+            } catch (Throwable ignored) {
+                // Best effort.
+            }
+        }
+        if (keyBound) {
+            try {
+                unbindService(keyConnection);
+            } catch (Throwable ignored) {
+                // Never bound.
+            }
+        }
+        keyBound = false;
+        inputManager = null;
+        keyListener = null;
+        keyStatus.setTextColor(TEXT);
+        keyStatus.setText("已停止");
+    }
+
+    private final ServiceConnection keyConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            inputManager = IInputManager.Stub.asInterface(service);
+            keyListener = new IInputListener.Stub() {
+                @Override
+                public void onKeyCodeEvent(int keyCode, int event, int softKeyFunction) {
+                    appendKey("onKeyCodeEvent", keyCode, "event=" + event + " soft=" + softKeyFunction);
+                }
+
+                @Override
+                public void onShortClick(int keyCode, int softKeyFunction) {
+                    appendKey("onShortClick", keyCode, "soft=" + softKeyFunction);
+                }
+
+                @Override
+                public void onHoldingPressStarted(int keyCode, int softKeyFunction) {
+                    appendKey("onHoldingPressStarted", keyCode, "soft=" + softKeyFunction);
+                }
+
+                @Override
+                public void onHoldingPressStopped(int keyCode, int softKeyFunction) {
+                    appendKey("onHoldingPressStopped", keyCode, "soft=" + softKeyFunction);
+                }
+
+                @Override
+                public void onLongPressTriggered(int keyCode, int softKeyFunction) {
+                    appendKey("onLongPressTriggered", keyCode, "soft=" + softKeyFunction);
+                }
+
+                @Override
+                public void onDoubleClick(int keyCode, int softKeyFunction) {
+                    appendKey("onDoubleClick", keyCode, "soft=" + softKeyFunction);
+                }
+            };
+            int[] codes = new int[601 + 501];
+            int index = 0;
+            for (int code = 0; code <= 600; code++) {
+                codes[index++] = code;
+            }
+            for (int code = 200000; code <= 200500; code++) {
+                codes[index++] = code;
+            }
+            try {
+                inputManager.registerListener(keyListener, getPackageName(), codes);
+                keyStatus.setTextColor(OK);
+                keyStatus.setText("服务已连接，注册了 " + codes.length + " 个 keyCode。\n现在逐个按方向盘按键：");
+            } catch (Throwable t) {
+                keyStatus.setTextColor(MISSING);
+                keyStatus.setText("registerListener 失败: " + t.getClass().getSimpleName()
+                        + (t.getMessage() == null ? "" : " " + t.getMessage()));
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            keyStatus.setTextColor(WARN);
+            keyStatus.setText("服务断开");
+            inputManager = null;
+            keyListener = null;
+        }
+    };
+
+    private void appendKey(String callback, int keyCode, String extra) {
+        String line = callback + "  keyCode=" + keyCode + "  " + extra + "\n";
+        runOnUiThread(() -> {
+            keyLogText.append(line);
+            keyLog.setText(keyLogText.toString());
         });
     }
 
